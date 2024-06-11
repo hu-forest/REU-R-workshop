@@ -1,0 +1,356 @@
+---
+title: "REU_2024_R_workshop"
+author: "Xiaojie Gao"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Here are the libraries we will be using, make sure to install them
+library(data.table) # data.table is more advanced data.frame
+library(tmap) # facilitates map making 
+library(maptiles) # can download online map tiles
+library(terra) # geospatial raster image processing
+```
+
+## Overview of the workshop
+
+The purpose of the workshop is to give some sense about how to use R in scientific research and best practices of open science. Here are the major contents we will go through:
+
+- Make a static and an interactive map.
+- Install and use open source R packages from Github.
+- Conduct bivariate linear relationships.
+- Practice open science using git and Github.
+
+## 1. Make a map
+
+Say, we want to make an image about global eddy-covariance flux tower sites. How would you do it?
+
+```{r}
+# Read in a data.table that contains site info
+sites <- fread("data/sites_fluxnet2015.csv")
+head(sites)
+```
+Make a `terra::vect` object to store the coordinates in a geospatial format:
+
+```{r}
+# epsg:4326 means lat/lon coordinate reference system
+sites_vec <- vect(sites, geom = c("lon", "lat"), crs = "epsg:4326")
+plot(sites_vec)
+```
+Load the internal "World" dataset:
+
+```{r}
+data("World")
+plot(World[2], main = "")
+```
+Download map tiles as our background image:
+
+```{r}
+# Change the `provider` to see different styles
+tile <- maptiles::get_tiles(World,
+    zoom = 2,
+    provider = "OpenStreetMap"
+)
+
+flux_map <- tm_shape(tile) +
+    tm_rgb() +
+    tm_layout(frame = FALSE)
+
+flux_map
+```
+Now, we add the `World` data onto this map:
+
+```{r}
+flux_map <- flux_map + 
+    tm_shape(World) +
+    tm_borders()
+
+flux_map
+```
+Add flux tower site locations as points:
+
+```{r}
+flux_map <- flux_map + 
+    tm_shape(sf::st_as_sf(sites_vec)) +
+    tm_dots(col = "IGBP", palette = hcl.colors(12, "dynamic"), 
+        shape = 21, size = 0.1, border.col = "white"
+    ) +
+    tm_layout(legend.outside = TRUE, legend.outside.size = 0.1)
+
+flux_map
+```
+Note that the flux tower sites in Europe are a bit too dense to see, can we make them more visible? (Hint: we have a lot of empty space on this map)
+
+```{r}
+# Define Europe boundary，Note that the order is `xmin, xmax, ymin, ymax`
+eu_bbox <- ext(-10, 38, 33, 63)
+# Zoom in the map, note that the order of `bbox` is `xmin, ymin, xmax, ymax`
+eu_map <- tm_shape(tile, bbox = eu_bbox[c(1, 3, 2, 4)]) +
+    tm_rgb() +
+    tm_layout(frame = FALSE) +
+    tm_shape(World) +
+    tm_polygons(alpha = 0) +
+    tm_shape(sf::st_as_sf(sites_vec)) +
+    tm_dots(
+        col = "IGBP", palette = hcl.colors(12, "dynamic"),
+        shape = 21, size = 0.1, border.col = "white", 
+        legend.show = FALSE
+    )
+
+eu_map
+```
+```{r}
+# Construct a boundary polygon
+eu_bbox_vect <- as.polygons(eu_bbox, crs = "epsg:4326")
+# Draw the polygon on the map canvas
+flux_map <- flux_map + tm_shape(sf::st_as_sf(eu_bbox_vect)) +
+    tm_polygons(alpha = 0, lwd = 2, border.col = "white")
+
+print(flux_map)
+print(eu_map, vp = grid::viewport(x = 0.05, y = 0.2, 
+    just = c("left", "bottom"),
+    width = 0.13, height = 0.2)
+)
+```
+
+What if we want to make this map interactive? One thing great in `tmap` is that our code is transferable for interactive applications such as a web-based map.
+
+```{r}
+tmap_mode("view")
+flux_map
+```
+Bonus: let's make a map to show Harvard Forest EMS flux tower!
+
+```{r }
+# Find the site
+hf_site <- sites_vec[sites_vec$siteID == "US-Ha1", ]
+
+# Make a 3000 m buffer
+hf_site_buf <- buffer(hf_site, width = 3000)
+
+plot(hf_site, xlim = c(-72.3, -72.05), ylim = c(42.45, 42.6))
+plot(hf_site_buf, add = TRUE)
+```
+
+```{r}
+tile <- maptiles::get_tiles(ext(hf_site_buf),
+    zoom = 15,
+    crop = TRUE,
+    provider = "Esri.WorldImagery"
+)
+plot(tile)
+```
+```{r}
+hf_tower <- tm_shape(tile) +
+    tm_rgb() +
+    tm_shape(st_as_sf(hf_site)) +
+    tm_dots(col = "red", size = 0.5, shape = 24, 
+        border.col = "white", border.lwd = 2
+    ) +
+    tm_text(text = "site_name", col = "white", ymod = -1) +
+    tm_scale_bar(position = c("right", "bottom"), width = 0.3,
+        text.size = 1, text.color = "white"
+    ) +
+    tm_compass(position = c("right", "top"), 
+        text.color = "white", size = 3, type = "4star"
+    ) +
+    tm_layout(frame = FALSE)
+
+hf_tower
+```
+
+```{r}
+tmap_mode("plot")
+print(hf_tower)
+```
+
+
+## 2. Phenology-carbon relationship
+
+In this section, we are going to investigate the relationship between plants' growing season length and annual carbon sequestration. We use satellite remote sensing. 
+
+The satellite-based greenness measurements are stored in the `data/us-ha1_evi2.csv`. 
+
+### Remotely sensed plant phenology by Landsat satellite
+
+```{r}
+evi2_dt <- fread("data/us-ha1_evi2.csv")
+evi2_dt <- evi2_dt[year(Date) > 1991]
+head(evi2_dt)
+```
+
+Let's plot these values as a point time series:
+
+```{r}
+cols <- RColorBrewer::brewer.pal(8, "Set2")
+plot(evi2_dt[, .(Date, evi2)],
+    ylim = c(0, 1),
+    xlab = "Date", ylab = "EVI2",
+    mgp = c(2, 0.5, 0),
+    bty = "L", las = 1,
+    cex = 0
+)
+sensor_names <- c("L5", "L7", "L8", "L9", "HLSS30", "HLSL30")
+for (i in seq_along(sensor_names)) {
+    points(evi2_dt[sensor == sensor_names[i], .(Date, evi2)],
+        col = cols[i],
+        pch = 16,
+        cex = 0.5
+    )
+}
+legend(grconvertX(0.5, "ndc"), grconvertY(0.9, "ndc"),
+    xjust = 0.5,
+    legend = sensor_names,
+    pch = 16, col = cols, bty = "n",
+    pt.cex = 0.5, xpd = NA,
+    horiz = TRUE
+)
+```
+
+
+To retrieve phenology from this time series, we need to use a curve fitting algorithm to interpolate the gaps between observations. Here, we use the [`blsp` package](https://github.com/ncsuSEAL/Bayesian_LSP) from Github to perform this task. Check the website for information of the package. 
+
+```{r eval=FALSE}
+devtools::install_github("ncsuSEAL/Bayesian_LSP", build_vignettes = FALSE)
+```
+
+No need to understand the details of the following code chunk except that it will give us phenological dates from the satellite observations. It will take some time for the model to run. 
+
+```{r}
+library(blsp)
+
+avgfit <- FitAvgModel(
+    date_vec = evi2_dt$Date,
+    vi_vec = evi2_dt$evi2,
+    model = "dblog7"
+)
+blsp_fit <- FitBLSP(
+    date_vec = evi2_dt$Date,
+    vi_vec = evi2_dt$evi2,
+    model = "dblog7",
+    init_values = avgfit,
+    start_yr = 1991,
+    end_yr = 2023,
+    cred_int_level = 0.95,
+    opt = list(method = "threshold"),
+    verbose = TRUE
+)
+```
+
+```{r fig.width=10, fig.height=6}
+PlotBLSP(blsp_fit)
+```
+
+```{r}
+phenos <- blsp_fit$phenos
+gsl_dt <- phenos[, .(year = as.integer(Year), GSL = Dormancy - Greenup)]
+plot(gsl_dt[, .(year, GSL)], type = "b")
+```
+
+
+### Eddy-covariance GPP measurements
+
+Now, we load annual gross primary productivity (GPP) data measured by the EMS flux tower. 
+
+```{r fig.width=10, fig.height=8}
+gpp_dt <- fread("data/us-ha1_annual_gpp.csv")
+
+par(mfrow = c(2, 1))
+plot(gsl_dt[, .(year, GSL)], type = "b")
+plot(gpp_dt[, .(year, GPP)], type = "b", 
+  ylab = expression(GPP~(umol / m^2 / year))     
+)
+```
+
+
+### Linear regression
+
+Now, we will fit a linear regression model to investigate the relationship between annual GPP and growing season length.
+
+```{r}
+# Merge the data together
+com_dt <- merge(gsl_dt, gpp_dt, by.x = "year", by.y = "year")
+head(com_dt)
+```
+Fitting a linear regression in R is very simple, just use the `lm()` function, and the `summary()` function can give us the statistics of the model fit:
+
+```{r}
+mod <- lm(GPP ~ GSL, data = com_dt)
+summary(mod)
+```
+```{r fig.width=5, fig.height=5}
+plot(com_dt[, .(GSL, GPP)], pch = 16, bty = "L")
+# Draw the linear regression line
+abline(mod, col = "blue")
+# Plot the R^2 value using the legend function
+r_sqr <- round(summary(mod)$r.square, 2)
+legend("topleft", bty = "n", legend = bquote(R^2 == .(r_sqr)))
+
+# Also plot the p-value
+f <- summary(mod)$fstatistic
+p_val <- pf(f[1], f[2], f[3], lower.tail = FALSE)
+legend("topleft", bty = "n", 
+    legend = paste("p-value: ", formatC(p_val, format = "e", digits = 2)),
+    y.intersp = 3 # Note this line!
+)
+```
+Note this is a oversimplified analysis! In the real world, we should look closely to the model fit and the outliers to make sure the mathematical assumptions of linear regression are satisfied.
+
+## 3. Github for open science
+
+Reproducibility is CRITICAL in science (https://www.nature.com/articles/d41586-019-00067-3). Get your code version controlled not only facilitates reproducibility but also helps you understand and reuse your code in the future. 
+
+### Useful resources
+
+- Git: https://www.git-scm.com/
+- GitHub: https://github.com/
+- Reproducible Research with R and RStudio:  https://englianhu.wordpress.com/wp-content/uploads/2016/01/reproducible-research-with-r-and-studio-2nd-edition.pdf
+- 
+
+### Some commands
+
+```
+# Init the Git repository
+git init
+
+# Add README.md to the Git repository
+git add README.md
+
+# Add all files to the respository
+git add .
+
+# Commit changes
+git commit -a -m "Create README"
+
+# Display status
+git status -s
+
+# Check history of commits
+git log
+
+# Checkout a branch
+git checkout -b newbranch
+```
+
+### Life saving coding tips
+
+- Always put space between operators to increase readability: `a <- 1` not `a<-1`.
+- Don't write very wide lines (80-85 characters max per line).
+- Name variables with meanings.
+- Write clear and concise comments when necessary.
+- Create small scripts to organize project structure and use functions to organize script structure.
+
+
+
+
+
+
+
+
+
+
+
+
