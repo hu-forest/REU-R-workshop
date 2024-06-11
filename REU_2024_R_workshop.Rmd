@@ -333,6 +333,9 @@ git log
 
 # Checkout a branch
 git checkout -b newbranch
+
+# Git clone
+git clone
 ```
 
 ### Life saving coding tips
