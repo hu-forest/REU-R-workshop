@@ -213,6 +213,8 @@ legend(grconvertX(0.5, "ndc"), grconvertY(0.9, "ndc"),
 
 To retrieve phenology from this time series, we need to use a curve fitting algorithm to interpolate the gaps between observations. Here, we use the [`blsp` package](https://github.com/ncsuSEAL/Bayesian_LSP) from Github to perform this task. Check the website for information of the package. 
 
+Note that to install the `blsp` package using your local computer, you need to also install the software [Just Another Gibbs Sampler (JAGS)](https://sourceforge.net/projects/mcmc-jags/files/). Don't worry about the software, we need to install it but `blsp` will handle how to use it, we don't!
+
 ```{r eval=FALSE}
 devtools::install_github("ncsuSEAL/Bayesian_LSP", build_vignettes = FALSE)
 ```
